@@ -337,6 +337,8 @@ async def handle_url(message: types.Message, state: FSMContext):
         )
         
         await state.set_state(ProductStates.waiting_for_target_price)
+        # Clear last bot message so next response is always new
+        user_last_bot_message.pop(user_id, None)
         
     except ValueError as e:
         await send_or_edit(user_id, f"❌ Error: {str(e)}")
@@ -416,14 +418,18 @@ async def handle_target_price(message: types.Message, state: FSMContext):
         
         # Clear state
         await state.clear()
+        # Clear last bot message so next response is always new
+        user_last_bot_message.pop(user_id, None)
         
     except ValueError as e:
         await send_or_edit(user_id, f"❌ {str(e)}")
         await state.clear()
+        user_last_bot_message.pop(user_id, None)
     except Exception as e:
         logger.error(f"Error adding product: {e}")
         await send_or_edit(user_id, "❌ Sorry, I couldn't add this product. Please try again later.")
         await state.clear()
+        user_last_bot_message.pop(user_id, None)
 
 # Callback query handlers
 @dp.callback_query(lambda c: c.data.startswith('remove_'))
