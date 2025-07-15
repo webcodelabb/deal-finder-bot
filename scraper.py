@@ -345,5 +345,44 @@ class ProductScraper:
             'site_name': 'konga'
         }
 
+def clean_product_url(url: str, site_name: str) -> str:
+    from urllib.parse import urlparse, parse_qs, urlunparse, unquote
+    if site_name == 'amazon':
+        # Try to extract /dp/ASIN from any Amazon URL
+        import re
+        match = re.search(r"/dp/([A-Z0-9]{10})", url)
+        if match:
+            asin = match.group(1)
+            return f"https://www.amazon.com/dp/{asin}"
+        # Sometimes ASIN is in /gp/product/ASIN
+        match = re.search(r"/gp/product/([A-Z0-9]{10})", url)
+        if match:
+            asin = match.group(1)
+            return f"https://www.amazon.com/dp/{asin}"
+        # If url is a redirect (e.g., /sspa/click?...&url=%2Fdp%2FB09VVDYM7N%2F...)
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        if 'url' in qs:
+            decoded = unquote(qs['url'][0])
+            return clean_product_url(decoded, 'amazon')
+        return url.split('?')[0]
+    elif site_name == 'aliexpress':
+        # Remove query params, keep only main product URL
+        parsed = urlparse(url)
+        clean_url = urlunparse(parsed._replace(query="", fragment=""))
+        return clean_url
+    elif site_name == 'jumia':
+        # Remove query params, keep only main product URL
+        parsed = urlparse(url)
+        clean_url = urlunparse(parsed._replace(query="", fragment=""))
+        return clean_url
+    elif site_name == 'konga':
+        # Remove query params, keep only main product URL
+        parsed = urlparse(url)
+        clean_url = urlunparse(parsed._replace(query="", fragment=""))
+        return clean_url
+    else:
+        return url
+
 # Global scraper instance
 scraper = ProductScraper() 

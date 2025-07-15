@@ -2,14 +2,14 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN, WELCOME_MESSAGE, HELP_MESSAGE
 from db import db
-from scraper import scraper
+from scraper import scraper, clean_product_url
 from scheduler import start_scheduler
 
 # Configure logging
@@ -275,32 +275,17 @@ async def cmd_history(message: types.Message):
 # URL handling
 @dp.message(F.text.contains("http"))
 async def handle_url(message: types.Message, state: FSMContext):
-    """Handle product URLs"""
     user_id = message.from_user.id
-    
-    # Check if user exists
     user = db.get_user(user_id)
     if not user:
         await send_or_edit(user_id, "❌ Please use /start first to initialize your account.")
         return
-    
-    # Extract URL from message
     text = message.text
-    urls = []
-    
-    # Simple URL extraction (can be improved with regex)
-    words = text.split()
-    for word in words:
-        if word.startswith(('http://', 'https://')):
-            urls.append(word)
-    
+    urls = [word for word in text.split() if word.startswith(('http://', 'https://'))]
     if not urls:
-        return  # Not a URL message
-    
+        return
     url = urls[0]
-    
     try:
-        # Check if URL is supported
         is_supported, site_name = scraper.is_supported_site(url)
         if not is_supported:
             await send_or_edit(user_id,
@@ -311,40 +296,99 @@ async def handle_url(message: types.Message, state: FSMContext):
                 "• Konga"
             )
             return
-        
+        # Clean the URL
+        clean_url = clean_product_url(url, site_name)
         # Extract product information
         await send_or_edit(user_id, "🔍 Extracting product information...")
-        product_info = scraper.extract_product_info(url)
-        
-        # Store product info in state for target price input
+        product_info = scraper.extract_product_info(clean_url)
+        # Store product info in state for button callbacks
         await state.update_data(
-            url=url,
+            url=clean_url,
             title=product_info['title'],
             price=product_info['price'],
             currency=product_info['currency'],
             image_url=product_info['image_url'],
             site_name=product_info['site_name']
         )
-        
-        # Ask for target price
+        # Product info message
         price_text = f"{product_info['currency']}{product_info['price']:,.2f}"
-        await send_or_edit(user_id,
+        product_text = (
             f"📦 <b>{product_info['title']}</b>\n"
-            f"💰 Current Price: {price_text}\n\n"
-            f"🎯 <b>Set a target price? (optional)</b>\n"
-            f"Reply with a price (e.g., {product_info['currency']}1000) or send 'skip' to continue without a target.",
-            parse_mode="Markdown"
+            f"💰 <b>Current Price:</b> {price_text}\n\n"
+            f"<a href=\"{clean_url}\">🔗 View Product</a>\n\n"
+            f"How would you like to track this product?"
         )
-        
-        await state.set_state(ProductStates.waiting_for_target_price)
-        # Clear last bot message so next response is always new
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Start Tracking", callback_data="track_now"),
+                    InlineKeyboardButton(text="🎯 Set Target Price", callback_data="track_target")
+                ]
+            ]
+        )
+        await send_or_edit(user_id, product_text, reply_markup=keyboard)
+        # Clear last bot message so next response is always new after this flow
         user_last_bot_message.pop(user_id, None)
-        
     except ValueError as e:
         await send_or_edit(user_id, f"❌ Error: {str(e)}")
     except Exception as e:
         logger.error(f"Error processing URL: {e}")
         await send_or_edit(user_id, "❌ Sorry, I couldn't process this product. Please try again later.")
+
+@dp.callback_query(F.data == "track_now")
+async def handle_track_now(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    try:
+        product_id = db.add_product(
+            user_id=user_id,
+            url=data['url'],
+            title=data['title'],
+            current_price=data['price'],
+            currency=data['currency'],
+            image_url=data['image_url'],
+            target_price=0.0,
+            site_name=data['site_name']
+        )
+        price_text = f"{data['currency']}{data['price']:,.2f}"
+        response_text = (
+            f"✅ <b>Tracking Started!</b>\n\n"
+            f"📦 <b>{data['title']}</b>\n"
+            f"💰 Current Price: {price_text}\n\n"
+            f"🔔 You'll be notified when the price drops!"
+        )
+        products = db.get_user_products(user_id)
+        product = next((p for p in products if p['id'] == product_id), None)
+        if product:
+            keyboard = get_product_keyboard(product['id'], product['affiliate_url'])
+            await send_or_edit(user_id, response_text, reply_markup=keyboard)
+        else:
+            await send_or_edit(user_id, response_text)
+        await state.clear()
+        user_last_bot_message.pop(user_id, None)
+    except ValueError as e:
+        await send_or_edit(user_id, f"❌ {str(e)}")
+        await state.clear()
+        user_last_bot_message.pop(user_id, None)
+    except Exception as e:
+        logger.error(f"Error adding product: {e}")
+        await send_or_edit(user_id, "❌ Sorry, I couldn't add this product. Please try again later.")
+        await state.clear()
+        user_last_bot_message.pop(user_id, None)
+
+@dp.callback_query(F.data == "track_target")
+async def handle_track_target(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    price_text = f"{data['currency']}{data['price']:,.2f}"
+    prompt = (
+        f"📦 <b>{data['title']}</b>\n"
+        f"💰 Current Price: {price_text}\n\n"
+        f"🎯 <b>Enter your target price below:</b>\n"
+        f"(e.g., {data['currency']}10.00)"
+    )
+    await send_or_edit(user_id, prompt)
+    await state.set_state(ProductStates.waiting_for_target_price)
 
 @dp.message(ProductStates.waiting_for_target_price)
 async def handle_target_price(message: types.Message, state: FSMContext):
