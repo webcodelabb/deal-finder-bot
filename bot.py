@@ -17,6 +17,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize bot and dispatcher
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is required. Please set it in Railway variables.")
+
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)

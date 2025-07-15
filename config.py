@@ -6,8 +6,7 @@ load_dotenv()
 
 # Bot Configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is required")
+# Don't raise error immediately - let the bot handle it gracefully
 
 # Database Configuration
 DATABASE_PATH = "deal_finder.db"
