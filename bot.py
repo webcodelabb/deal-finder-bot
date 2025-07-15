@@ -2,7 +2,7 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -55,6 +55,48 @@ def get_remove_keyboard(products: list) -> InlineKeyboardMarkup:
     keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_remove")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+async def set_bot_commands(bot: Bot):
+    commands = [
+        BotCommand(command="start", description="Get started with DealFinder Bot"),
+        BotCommand(command="help", description="How to use the bot"),
+        BotCommand(command="myproducts", description="View your tracked products"),
+        BotCommand(command="remove", description="Remove a tracked product"),
+        BotCommand(command="referral", description="Get your referral link and stats"),
+        BotCommand(command="limits", description="Check your tracking limits"),
+        BotCommand(command="history", description="View price history for products"),
+    ]
+    await bot.set_my_commands(commands)
+
+# In-memory store for last bot message per user
+user_last_bot_message = {}
+
+async def send_or_edit(user_id, text, parse_mode="HTML", reply_markup=None):
+    """Edit the last bot message for the user, or send a new one if not possible."""
+    from aiogram.exceptions import TelegramBadRequest
+    message_id = user_last_bot_message.get(user_id)
+    try:
+        if message_id:
+            await bot.edit_message_text(
+                text,
+                chat_id=user_id,
+                message_id=message_id,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+        else:
+            msg = await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+            user_last_bot_message[user_id] = msg.message_id
+            return
+    except TelegramBadRequest:
+        # If editing fails (e.g., message too old), delete and send new
+        try:
+            if message_id:
+                await bot.delete_message(user_id, message_id)
+        except Exception:
+            pass
+        msg = await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+        user_last_bot_message[user_id] = msg.message_id
+
 # Command handlers
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -78,21 +120,39 @@ async def cmd_start(message: types.Message):
         referral_code = db.create_user(user_id, username)
     
     # Send welcome message
-    await message.answer(WELCOME_MESSAGE)
+    # Professional welcome message
+    welcome_text = (
+        "<b>🤖 Welcome to DealFinder Bot!</b>\n\n"
+        "Track prices and get alerts for your favorite products on <b>Amazon, AliExpress, Jumia, and Konga</b>.\n\n"
+        "<b>How it works:</b>\n"
+        "• Paste a product link to start tracking\n"
+        "• Set a target price (optional)\n"
+        "• Get notified when the price drops!\n\n"
+        "<b>Commands:</b>\n"
+        "/myproducts - View your tracked products\n"
+        "/remove - Remove a tracked product\n"
+        "/referral - Get your referral link\n"
+        "/limits - Check your tracking limits\n"
+        "/history - View price history\n"
+        "/help - How to use the bot\n\n"
+        "<i>Invite friends to unlock more product slots and premium features!</i>"
+    )
+    await send_or_edit(user_id, welcome_text)
     
     # If user was referred, send thank you message
     if referred_by:
-        await message.answer(
+        await send_or_edit(
+            user_id,
             f"🎉 You were invited by a friend! You now have access to premium features.\n"
-            f"Your referral code: `{referral_code}`\n"
+            f"Your referral code: <code>{referral_code}</code>\n"
             f"Share it with friends to unlock more product slots!",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     """Handle /help command"""
-    await message.answer(HELP_MESSAGE)
+    await send_or_edit(message.from_user.id, HELP_MESSAGE, parse_mode="HTML")
 
 @dp.message(Command("myproducts"))
 async def cmd_myproducts(message: types.Message):
@@ -101,30 +161,31 @@ async def cmd_myproducts(message: types.Message):
     products = db.get_user_products(user_id)
     
     if not products:
-        await message.answer("📦 You're not tracking any products yet.\nSend me a product link to get started!")
+        await send_or_edit(user_id, "📦 You're not tracking any products yet.\nSend me a product link to get started!")
         return
     
     user = db.get_user(user_id)
     if not user:
-        await message.answer("❌ User not found. Please use /start first.")
+        await send_or_edit(user_id, "❌ User not found. Please use /start first.")
         return
-    await message.answer(
-        f"📦 **Your Tracked Products** ({len(products)}/{user['max_products']})\n\n"
+    header = (
+        f"📦 <b>Your Tracked Products</b> ({len(products)}/{user['max_products']})\n\n"
         f"🎁 Refer friends to unlock more slots!"
     )
+    await send_or_edit(user_id, header)
     
     for product in products:
         price_text = f"{product['currency']}{product['current_price']:,.2f}"
         target_text = f"\n🎯 Target: {product['currency']}{product['target_price']:,.2f}" if product['target_price'] else ""
         
         text = (
-            f"📦 **{product['title']}**\n"
+            f"📦 <b>{product['title']}</b>\n"
             f"💰 Current Price: {price_text}{target_text}\n"
             f"🕒 Added: {product['created_at'][:10]}"
         )
         
         keyboard = get_product_keyboard(product['id'], product['affiliate_url'])
-        await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+        await send_or_edit(user_id, text, reply_markup=keyboard)
 
 @dp.message(Command("remove"))
 async def cmd_remove(message: types.Message):
@@ -133,15 +194,11 @@ async def cmd_remove(message: types.Message):
     products = db.get_user_products(user_id)
     
     if not products:
-        await message.answer("📦 You're not tracking any products to remove.")
+        await send_or_edit(user_id, "📦 You're not tracking any products to remove.")
         return
     
     keyboard = get_remove_keyboard(products)
-    await message.answer(
-        "🗑 **Select a product to remove:**",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
+    await send_or_edit(user_id, "🗑 <b>Select a product to remove:</b>", reply_markup=keyboard)
 
 @dp.message(Command("referral"))
 async def cmd_referral(message: types.Message):
@@ -150,28 +207,28 @@ async def cmd_referral(message: types.Message):
     user = db.get_user(user_id)
     
     if not user:
-        await message.answer("❌ User not found. Please use /start first.")
+        await send_or_edit(user_id, "❌ User not found. Please use /start first.")
         return
     
     stats = db.get_referral_stats(user_id)
     if not stats:
-        await message.answer("❌ Could not load referral stats.")
+        await send_or_edit(user_id, "❌ Could not load referral stats.")
         return
     
     bot_username = (await bot.me()).username
     referral_link = f"https://t.me/{bot_username}?start={user['referral_code']}"
     
     text = (
-        f"🎁 **Your Referral Stats**\n\n"
+        f"🎁 <b>Your Referral Stats</b>\n\n"
         f"📊 Referrals: {stats['referral_count']}\n"
         f"📦 Product Slots: {stats['max_products']}\n"
         f"⭐ Premium Features: {'Yes' if stats['premium_features'] else 'No'}\n\n"
-        f"🔗 **Your Referral Link:**\n"
-        f"`{referral_link}`\n\n"
+        f"🔗 <b>Your Referral Link:</b>\n"
+        f"<code>{referral_link}</code>\n\n"
         f"💡 Share this link with friends to unlock more product slots!"
     )
     
-    await message.answer(text, parse_mode="Markdown")
+    await send_or_edit(user_id, text)
 
 @dp.message(Command("limits"))
 async def cmd_limits(message: types.Message):
@@ -180,23 +237,23 @@ async def cmd_limits(message: types.Message):
     user = db.get_user(user_id)
     
     if not user:
-        await message.answer("❌ User not found. Please use /start first.")
+        await send_or_edit(user_id, "❌ User not found. Please use /start first.")
         return
     
     current_count = db.get_user_product_count(user_id)
     
     text = (
-        f"📊 **Your Tracking Limits**\n\n"
+        f"📊 <b>Your Tracking Limits</b>\n\n"
         f"📦 Current Products: {current_count}\n"
         f"🔢 Maximum Products: {user['max_products']}\n"
         f"⭐ Premium Features: {'Yes' if user['premium_features'] else 'No'}\n\n"
-        f"🎁 **How to unlock more:**\n"
+        f"🎁 <b>How to unlock more:</b>\n"
         f"• Each referral = +1 product slot\n"
         f"• Premium users get faster price checks\n\n"
         f"Use /referral to get your referral link!"
     )
     
-    await message.answer(text, parse_mode="Markdown")
+    await send_or_edit(user_id, text)
 
 @dp.message(Command("history"))
 async def cmd_history(message: types.Message):
@@ -204,7 +261,7 @@ async def cmd_history(message: types.Message):
     user_id = message.from_user.id
     products = db.get_user_products(user_id)
     if not products:
-        await message.answer("📦 You're not tracking any products yet.")
+        await send_or_edit(user_id, "📦 You're not tracking any products yet.")
         return
     # Show product list as inline buttons
     keyboard = InlineKeyboardMarkup(
@@ -213,7 +270,7 @@ async def cmd_history(message: types.Message):
             for product in products
         ]
     )
-    await message.answer("📈 <b>Select a product to view its price history:</b>", reply_markup=keyboard, parse_mode="HTML")
+    await send_or_edit(user_id, "📈 <b>Select a product to view its price history:</b>", reply_markup=keyboard)
 
 # URL handling
 @dp.message(F.text.contains("http"))
@@ -224,7 +281,7 @@ async def handle_url(message: types.Message, state: FSMContext):
     # Check if user exists
     user = db.get_user(user_id)
     if not user:
-        await message.answer("❌ Please use /start first to initialize your account.")
+        await send_or_edit(user_id, "❌ Please use /start first to initialize your account.")
         return
     
     # Extract URL from message
@@ -246,7 +303,7 @@ async def handle_url(message: types.Message, state: FSMContext):
         # Check if URL is supported
         is_supported, site_name = scraper.is_supported_site(url)
         if not is_supported:
-            await message.answer(
+            await send_or_edit(user_id,
                 "❌ Unsupported website. Please use:\n"
                 "• Amazon\n"
                 "• AliExpress\n"
@@ -256,7 +313,7 @@ async def handle_url(message: types.Message, state: FSMContext):
             return
         
         # Extract product information
-        await message.answer("🔍 Extracting product information...")
+        await send_or_edit(user_id, "🔍 Extracting product information...")
         product_info = scraper.extract_product_info(url)
         
         # Store product info in state for target price input
@@ -271,10 +328,10 @@ async def handle_url(message: types.Message, state: FSMContext):
         
         # Ask for target price
         price_text = f"{product_info['currency']}{product_info['price']:,.2f}"
-        await message.answer(
-            f"📦 **{product_info['title']}**\n"
+        await send_or_edit(user_id,
+            f"📦 <b>{product_info['title']}</b>\n"
             f"💰 Current Price: {price_text}\n\n"
-            f"🎯 **Set a target price?** (optional)\n"
+            f"🎯 <b>Set a target price? (optional)</b>\n"
             f"Reply with a price (e.g., {product_info['currency']}1000) or send 'skip' to continue without a target.",
             parse_mode="Markdown"
         )
@@ -282,10 +339,10 @@ async def handle_url(message: types.Message, state: FSMContext):
         await state.set_state(ProductStates.waiting_for_target_price)
         
     except ValueError as e:
-        await message.answer(f"❌ Error: {str(e)}")
+        await send_or_edit(user_id, f"❌ Error: {str(e)}")
     except Exception as e:
         logger.error(f"Error processing URL: {e}")
-        await message.answer("❌ Sorry, I couldn't process this product. Please try again later.")
+        await send_or_edit(user_id, "❌ Sorry, I couldn't process this product. Please try again later.")
 
 @dp.message(ProductStates.waiting_for_target_price)
 async def handle_target_price(message: types.Message, state: FSMContext):
@@ -305,10 +362,10 @@ async def handle_target_price(message: types.Message, state: FSMContext):
             if price_match:
                 target_price = float(price_match.group().replace(',', ''))
             else:
-                await message.answer("❌ Invalid price format. Please enter a number or 'skip'.")
+                await send_or_edit(user_id, "❌ Invalid price format. Please enter a number or 'skip'.")
                 return
         except ValueError:
-            await message.answer("❌ Invalid price format. Please enter a number or 'skip'.")
+            await send_or_edit(user_id, "❌ Invalid price format. Please enter a number or 'skip'.")
             return
     
     try:
@@ -341,8 +398,8 @@ async def handle_target_price(message: types.Message, state: FSMContext):
         target_text = f"\n🎯 Target Price: {data['currency']}{target_price:,.2f}" if target_price else ""
         
         response_text = (
-            f"✅ **Tracking Started!**\n\n"
-            f"📦 **{data['title']}**\n"
+            f"✅ <b>Tracking Started!</b>\n\n"
+            f"📦 <b>{data['title']}</b>\n"
             f"💰 Current Price: {price_text}{target_text}\n\n"
             f"🔔 You'll be notified when the price drops!"
         )
@@ -353,19 +410,19 @@ async def handle_target_price(message: types.Message, state: FSMContext):
         
         if product:
             keyboard = get_product_keyboard(product['id'], product['affiliate_url'])
-            await message.answer(response_text, reply_markup=keyboard, parse_mode="Markdown")
+            await send_or_edit(user_id, response_text, reply_markup=keyboard)
         else:
-            await message.answer(response_text, parse_mode="Markdown")
+            await send_or_edit(user_id, response_text)
         
         # Clear state
         await state.clear()
         
     except ValueError as e:
-        await message.answer(f"❌ {str(e)}")
+        await send_or_edit(user_id, f"❌ {str(e)}")
         await state.clear()
     except Exception as e:
         logger.error(f"Error adding product: {e}")
-        await message.answer("❌ Sorry, I couldn't add this product. Please try again later.")
+        await send_or_edit(user_id, "❌ Sorry, I couldn't add this product. Please try again later.")
         await state.clear()
 
 # Callback query handlers
@@ -386,11 +443,11 @@ async def handle_remove_callback(callback: types.CallbackQuery):
         success = db.remove_product(product_id, user_id)
         
         if success:
-            await callback.message.edit_text("✅ Product removed from tracking!")
+            await send_or_edit(user_id, "✅ Product removed from tracking!")
         else:
-            await callback.answer("❌ Product not found or you don't have permission.")
+            await send_or_edit(user_id, "❌ Product not found or you don't have permission.")
     except Exception as e:
-        await callback.answer(f"❌ Error: {str(e)}")
+        await send_or_edit(user_id, f"❌ Error: {str(e)}")
 
 @dp.callback_query(lambda c: c.data.startswith('history_'))
 async def handle_history_callback(callback: types.CallbackQuery):
@@ -400,7 +457,7 @@ async def handle_history_callback(callback: types.CallbackQuery):
     products = db.get_user_products(user_id)
     product = next((p for p in products if p['id'] == product_id), None)
     if not product:
-        await callback.answer("❌ Product not found or you don't have permission.")
+        await send_or_edit(user_id, "❌ Product not found or you don't have permission.")
         return
     # Get price history
     conn = db.get_connection()
@@ -409,16 +466,18 @@ async def handle_history_callback(callback: types.CallbackQuery):
     history = cursor.fetchall()
     conn.close()
     if not history:
-        await callback.message.edit_text("No price history found for this product.")
+        await send_or_edit(user_id, "No price history found for this product.")
         return
     text = f"📈 <b>Price History for:</b>\n<b>{product['title']}</b>\n\n"
     for row in history:
         date = row['recorded_at'][:10]
         price = f"{row['currency']}{row['price']:,.2f}"
         text += f"{date}: {price}\n"
-    await callback.message.edit_text(text, parse_mode="HTML")
+    await send_or_edit(user_id, text, parse_mode="HTML")
 
 async def main():
+    # Set bot command menu
+    await set_bot_commands(bot)
     # Start the scheduler
     start_scheduler(bot)
     await dp.start_polling(bot)
